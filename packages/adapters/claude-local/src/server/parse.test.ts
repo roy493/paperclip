@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractClaudeRetryNotBefore,
   isClaudeTransientUpstreamError,
+  isClaudeUsageLimitCap,
 } from "./parse.js";
 
 describe("isClaudeTransientUpstreamError", () => {
@@ -91,6 +92,68 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(
       isClaudeTransientUpstreamError({
         errorMessage: "Invalid request_error: Unknown parameter 'foo'.",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isClaudeUsageLimitCap", () => {
+  it("matches the 5h Pro/Max wire format with no minutes", () => {
+    expect(
+      isClaudeUsageLimitCap({
+        errorMessage: "You've hit your usage limit · resets 9pm (Europe/London)",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeUsageLimitCap({
+        errorMessage: "You're out of extra usage · resets 4pm (America/Chicago)",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches the weekly and monthly Team variants", () => {
+    expect(
+      isClaudeUsageLimitCap({
+        errorMessage: "Claude usage limit reached — weekly limit reached.",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeUsageLimitCap({
+        errorMessage: "5-hour limit reached.",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match generic transient upstream conditions where retry-on-cap won't help", () => {
+    expect(
+      isClaudeUsageLimitCap({
+        stderr: "HTTP 429: Too Many Requests",
+      }),
+    ).toBe(false);
+    expect(
+      isClaudeUsageLimitCap({
+        parsed: {
+          is_error: true,
+          errors: [{ type: "overloaded_error", message: "Overloaded" }],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isClaudeUsageLimitCap({
+        stderr: "Bedrock ThrottlingException: slow down",
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match login/auth failures or deterministic errors", () => {
+    expect(
+      isClaudeUsageLimitCap({
+        stderr: "Please log in. Run `claude login` first.",
+      }),
+    ).toBe(false);
+    expect(
+      isClaudeUsageLimitCap({
+        parsed: { subtype: "error_max_turns", result: "Maximum turns reached." },
       }),
     ).toBe(false);
   });

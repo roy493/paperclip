@@ -381,3 +381,35 @@ export function isClaudeTransientUpstreamError(input: {
   if (!haystack) return false;
   return CLAUDE_TRANSIENT_UPSTREAM_RE.test(haystack);
 }
+
+// Subset of transient-upstream that specifically indicates the *current
+// account* hit a subscription/usage cap (Pro/Max 5h, Team weekly/monthly).
+// We split this out from isClaudeTransientUpstreamError because retrying
+// is only useful when a per-account rotation wrapper (claude-rotate) can
+// pick a different account on the next attempt — retrying after a generic
+// 429 / 503 / overloaded won't help. Excludes login_required by re-using
+// the detector. (NOY-769)
+const CLAUDE_USAGE_LIMIT_CAP_RE =
+  /(?:out\s+of\s+extra\s+usage|extra\s+usage\b|claude\s+usage\s+limit|usage\s+limit\b|usage\s+cap\b|5[-\s]?hour\s+limit|weekly\s+limit|monthly\s+limit)/i;
+
+export function isClaudeUsageLimitCap(input: {
+  parsed?: Record<string, unknown> | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  errorMessage?: string | null;
+}): boolean {
+  const parsed = input.parsed ?? null;
+  if (parsed && (isClaudeMaxTurnsResult(parsed) || isClaudeUnknownSessionError(parsed))) {
+    return false;
+  }
+  const loginMeta = detectClaudeLoginRequired({
+    parsed,
+    stdout: input.stdout ?? "",
+    stderr: input.stderr ?? "",
+  });
+  if (loginMeta.requiresLogin) return false;
+
+  const haystack = buildClaudeTransientHaystack(input);
+  if (!haystack) return false;
+  return CLAUDE_USAGE_LIMIT_CAP_RE.test(haystack);
+}

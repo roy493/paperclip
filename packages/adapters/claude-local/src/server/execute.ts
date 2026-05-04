@@ -48,6 +48,7 @@ import {
   isClaudeMaxTurnsResult,
   isClaudeTransientUpstreamError,
   isClaudeUnknownSessionError,
+  isClaudeUsageLimitCap,
 } from "./parse.js";
 import { prepareClaudeConfigSeed } from "./claude-config.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
@@ -827,6 +828,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  // Detect the per-account usage cap signature (NOY-769). When the wrapping
+  // command is a rotation wrapper such as `claude-rotate`, a single cap on
+  // one account would otherwise take out every concurrent run that happened
+  // to land on it before state propagated. Re-invoking the command once
+  // gives the wrapper a chance to pick a fresh account; without a wrapper,
+  // the second attempt will return the same cap and we surface it normally.
+  const isCapAttempt = (attempt: {
+    proc: RunProcessResult;
+    parsed: Record<string, unknown> | null;
+  }) =>
+    !attempt.proc.timedOut &&
+    (attempt.proc.exitCode ?? 0) !== 0 &&
+    isClaudeUsageLimitCap({
+      parsed: attempt.parsed,
+      stdout: attempt.proc.stdout,
+      stderr: attempt.proc.stderr,
+    });
+
   try {
     const initial = await runAttempt(sessionId ?? null);
     if (
@@ -842,6 +861,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       const retry = await runAttempt(null);
       return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+    }
+
+    if (isCapAttempt(initial)) {
+      await onLog(
+        "stdout",
+        `[paperclip] retrying after cap on first attempt → next account in rotation (max once)\n`,
+      );
+      const retry = await runAttempt(sessionId ?? null);
+      return toAdapterResult(retry, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
     }
 
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });

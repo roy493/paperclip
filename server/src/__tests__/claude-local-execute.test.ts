@@ -905,6 +905,162 @@ describe("claude execute", () => {
     }
   });
 
+  it("retries once on a per-account usage cap signature and surfaces the second attempt", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-cap-retry-"));
+    const workspace = path.join(root, "workspace");
+    const binDir = path.join(root, "bin");
+    const commandPath = path.join(binDir, "claude");
+    const statePath = path.join(root, "attempt-count.txt");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(binDir, { recursive: true });
+    // First call returns the per-account cap; second call (after rotation) succeeds.
+    const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const statePath = ${JSON.stringify(statePath)};
+const attempt = fs.existsSync(statePath) ? Number(fs.readFileSync(statePath, "utf8")) + 1 : 1;
+fs.writeFileSync(statePath, String(attempt), "utf8");
+if (attempt === 1) {
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "error",
+    session_id: "claude-session-cap",
+    is_error: true,
+    result: "You've hit your usage limit · resets 9pm (Europe/London)",
+    errors: [{ type: "rate_limit_error", message: "out of extra usage" }],
+  }));
+  process.exit(1);
+}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-cap-2", model: "claude-sonnet" }));
+console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-cap-2", message: { content: [{ type: "text", text: "ok" }] } }));
+console.log(JSON.stringify({ type: "result", session_id: "claude-session-cap-2", result: "ok", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+    await fs.writeFile(commandPath, script, "utf8");
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    const previousPath = process.env.PATH;
+    process.env.HOME = root;
+    process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+    const logs: string[] = [];
+
+    try {
+      const result = await execute({
+        runId: "run-claude-cap-retry",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (_stream, chunk) => {
+          logs.push(chunk);
+        },
+      });
+
+      const attempts = Number(await fs.readFile(statePath, "utf8"));
+      expect(attempts).toBe(2);
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode ?? null).toBeNull();
+      expect(result.errorFamily ?? null).toBeNull();
+      expect(result.sessionId).toBe("claude-session-cap-2");
+      const retryLog = logs.join("");
+      expect(retryLog).toContain("retrying after cap");
+      expect(retryLog).toContain("max once");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retry a second time if the retry attempt also caps", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-cap-retry-fail-"));
+    const workspace = path.join(root, "workspace");
+    const binDir = path.join(root, "bin");
+    const commandPath = path.join(binDir, "claude");
+    const statePath = path.join(root, "attempt-count.txt");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(binDir, { recursive: true });
+    // Both calls return cap. The adapter must retry exactly once and surface
+    // the second cap, not loop further.
+    const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const statePath = ${JSON.stringify(statePath)};
+const attempt = fs.existsSync(statePath) ? Number(fs.readFileSync(statePath, "utf8")) + 1 : 1;
+fs.writeFileSync(statePath, String(attempt), "utf8");
+console.log(JSON.stringify({
+  type: "result",
+  subtype: "error",
+  session_id: "claude-session-cap",
+  is_error: true,
+  result: "You're out of extra usage · resets 9pm (Europe/London)",
+  errors: [{ type: "rate_limit_error", message: "out of extra usage" }],
+}));
+process.exit(1);
+`;
+    await fs.writeFile(commandPath, script, "utf8");
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    const previousPath = process.env.PATH;
+    process.env.HOME = root;
+    process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+
+    try {
+      const result = await execute({
+        runId: "run-claude-cap-retry-fail",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      const attempts = Number(await fs.readFile(statePath, "utf8"));
+      expect(attempts).toBe(2);
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("claude_transient_upstream");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not reclassify deterministic Claude failures (auth, max turns) as transient", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-execute-max-turns-"));
     const workspace = path.join(root, "workspace");
