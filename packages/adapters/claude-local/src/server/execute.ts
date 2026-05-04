@@ -112,6 +112,15 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+// Extract the rotation-account id from claude-rotate's stderr signal
+// (`running on account-<id> ...`). Used by the cap-retry path to surface
+// `account-X → account-Y` in the adapter log; returns null when the wrapper
+// is absent or the signal is missing.
+function extractClaudeRotateAccount(stderr: string): string | null {
+  const m = stderr.match(/running on account-(\S+)/);
+  return m ? m[1] : null;
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, executionTarget, authToken } = input;
 
@@ -864,11 +873,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     if (isCapAttempt(initial)) {
+      const cappedAccount = extractClaudeRotateAccount(initial.proc.stderr) ?? "?";
+      const retry = await runAttempt(sessionId ?? null);
+      const retriedAccount = extractClaudeRotateAccount(retry.proc.stderr) ?? "?";
       await onLog(
         "stdout",
-        `[paperclip] retrying after cap on first attempt → next account in rotation (max once)\n`,
+        `[paperclip] retrying after cap on account-${cappedAccount} → account-${retriedAccount} (max once)\n`,
       );
-      const retry = await runAttempt(sessionId ?? null);
       return toAdapterResult(retry, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
     }
 

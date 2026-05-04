@@ -920,6 +920,7 @@ const statePath = ${JSON.stringify(statePath)};
 const attempt = fs.existsSync(statePath) ? Number(fs.readFileSync(statePath, "utf8")) + 1 : 1;
 fs.writeFileSync(statePath, String(attempt), "utf8");
 if (attempt === 1) {
+  process.stderr.write("[claude-rotate] running on account-c (mode=round-robin, pool=a,b,c,d)\\n");
   console.log(JSON.stringify({
     type: "result",
     subtype: "error",
@@ -930,6 +931,7 @@ if (attempt === 1) {
   }));
   process.exit(1);
 }
+process.stderr.write("[claude-rotate] running on account-h (mode=round-robin, pool=a,b,d,h)\\n");
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-cap-2", model: "claude-sonnet" }));
 console.log(JSON.stringify({ type: "assistant", session_id: "claude-session-cap-2", message: { content: [{ type: "text", text: "ok" }] } }));
 console.log(JSON.stringify({ type: "result", session_id: "claude-session-cap-2", result: "ok", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
@@ -978,7 +980,7 @@ console.log(JSON.stringify({ type: "result", session_id: "claude-session-cap-2",
       expect(result.errorFamily ?? null).toBeNull();
       expect(result.sessionId).toBe("claude-session-cap-2");
       const retryLog = logs.join("");
-      expect(retryLog).toContain("retrying after cap");
+      expect(retryLog).toContain("retrying after cap on account-c → account-h");
       expect(retryLog).toContain("max once");
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
